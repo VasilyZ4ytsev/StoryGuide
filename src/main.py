@@ -1,46 +1,51 @@
-﻿import streamlit as st
+﻿import matplotlib.pyplot as plt
+import networkx as nx
+import streamlit as st
 
-from logic import check_rules, load_rules
-from mock_data import test_entity as default_data
+from knowledge_graph import create_graph, find_related_entities
 
-st.title("Отладчик продукционной системы")
-st.write("### Настройка входных данных")
+st.title("Исследователь графа знаний")
 
-rules = load_rules()
-genre_options = sorted(
-    set(default_data["genres"] + rules["lists"]["whitelist"] + rules["lists"]["blacklist"])
-)
+# 1. Загружаем граф
+graph = create_graph()
 
-user_year = st.sidebar.number_input(
-    "Год релиза:",
-    value=int(default_data["release_year"]),
-)
-user_genres = st.sidebar.multiselect(
-    "Жанры:",
-    options=genre_options,
-    default=default_data["genres"],
-)
-user_verified = st.sidebar.checkbox(
-    "Профиль подтвержден (True/False):",
-    value=default_data["is_verified"],
-)
+# 2. Выбор узла для анализа
+all_nodes = sorted(list(graph.nodes()))
+selected_node = st.selectbox("Выберите объект для поиска связей:", all_nodes)
 
-if st.button("Запустить проверку"):
-    current_test_data = {
-        "release_year": user_year,
-        "is_verified": user_verified,
-        "favorite_title": default_data["favorite_title"],
-        "genres": user_genres,
-    }
-
-    result = check_rules(current_test_data)
-
-    if "✅" in result:
-        st.success(result)
-    elif "⛔" in result:
-        st.error(result)
+# 3. Кнопка поиска
+if st.button("Найти связи"):
+    results = find_related_entities(graph, selected_node)
+    if results:
+        st.success(f"Объект '{selected_node}' связан с: {', '.join(results)}")
     else:
-        st.warning(result)
+        st.warning("Связи не найдены")
 
-    st.write("Текущий тестовый объект:")
-    st.json(current_test_data)
+# 4. Визуализация графа
+st.write("### Визуализация структуры")
+figure, axis = plt.subplots(figsize=(10, 7))
+
+positions = nx.spring_layout(graph, seed=42)
+
+node_colors = []
+for node in graph.nodes():
+    node_type = graph.nodes[node].get("type", "unknown")
+    if node_type == "media":
+        node_colors.append("lightblue")
+    elif node_type == "genre":
+        node_colors.append("lightgreen")
+    else:
+        node_colors.append("lightcoral")
+
+nx.draw(
+    graph,
+    positions,
+    with_labels=True,
+    node_color=node_colors,
+    edge_color="gray",
+    node_size=2200,
+    font_size=9,
+    ax=axis,
+)
+
+st.pyplot(figure)

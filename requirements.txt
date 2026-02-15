@@ -1,5 +1,6 @@
-pandas
+﻿pandas
 streamlit
 notebook
 opencv-python-headless
-
+networkx
+matplotlib
