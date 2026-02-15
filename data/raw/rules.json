@@ -1,0 +1,14 @@
+﻿{
+  "scenario_name": "Советчик фильмов и книг",
+  "thresholds": {
+    "min_year": 1940,
+    "max_year": 2026
+  },
+  "lists": {
+    "whitelist": ["фантастика", "фэнтези", "драма", "триллер"],
+    "blacklist": ["взрослый контент", "чрезмерное насилие"]
+  },
+  "critical_rules": {
+    "must_be_verified": true
+  }
+}
