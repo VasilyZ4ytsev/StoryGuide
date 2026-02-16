@@ -45,6 +45,11 @@ def create_graph():
     return graph
 
 
+def load_graph():
+    """Возвращает граф знаний для чат-интерфейса."""
+    return create_graph()
+
+
 def find_related_entities(graph, start_node):
     """Находит все узлы, связанные с выбранным узлом."""
     if start_node not in graph:
