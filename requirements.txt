@@ -1,6 +1,9 @@
-﻿pandas
+pandas
 streamlit
 notebook
 opencv-python-headless
 networkx
 matplotlib
+natasha
+setuptools
+pymorphy2-dicts-ru
