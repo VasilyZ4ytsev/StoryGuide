@@ -4,6 +4,10 @@ data/*
 !data/raw/
 data/raw/*
 !data/raw/rules.json
+!data/raw/MovieGenre.csv
+!data/raw/IMDB Dataset.csv
+!data/raw/SampleMoviePosters/
+!data/raw/SampleMoviePosters/**
 __pycache__/
 *.py[cod]
 *.pyo

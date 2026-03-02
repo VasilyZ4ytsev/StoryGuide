@@ -2,6 +2,8 @@ pandas
 streamlit
 notebook
 opencv-python-headless
+easyocr
+numpy
 networkx
 matplotlib
 natasha
