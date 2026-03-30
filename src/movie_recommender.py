@@ -1,12 +1,7 @@
 import math
-import re
 
-try:
-    from .dataset_loader import load_movie_metadata, match_movie_title
-    from .text_search_index import search_text_index, tokenize_text
-except ImportError:
-    from dataset_loader import load_movie_metadata, match_movie_title
-    from text_search_index import search_text_index, tokenize_text
+from src.dataset_loader import load_movie_metadata, match_movie_title
+from src.text_search_index import search_text_index, tokenize_text
 
 
 GENRE_KEYWORDS = {
@@ -24,6 +19,8 @@ GENRE_KEYWORDS = {
     "фантастика": {"фантастика", "sci-fi", "science", "fiction"},
     "триллер": {"триллер", "thriller"},
 }
+
+
 def _passes_year_filter(record, year_filter):
     if not year_filter:
         return True
@@ -40,6 +37,18 @@ def _passes_year_filter(record, year_filter):
     if min_year is not None and year < min_year:
         return False
     if max_year is not None and year > max_year:
+        return False
+    return True
+
+
+def _passes_genre_filters(record, include_genres=None, exclude_genres=None):
+    record_genres = {genre.strip().lower() for genre in record.get("genres_ru", []) if genre}
+    include_set = {genre.strip().lower() for genre in include_genres or [] if genre}
+    exclude_set = {genre.strip().lower() for genre in exclude_genres or [] if genre}
+
+    if include_set and not (record_genres & include_set):
+        return False
+    if exclude_set and (record_genres & exclude_set):
         return False
     return True
 
@@ -97,7 +106,13 @@ def _semantic_unigram_tokens(record):
     )
 
 
-def recommend_similar_movies(source_record, year_filter=None, limit=5):
+def recommend_similar_movies(
+    source_record,
+    year_filter=None,
+    include_genres=None,
+    exclude_genres=None,
+    limit=5,
+):
     source_genres = set(source_record.get("genres_ru", []))
     source_keywords = set(tokenize_text(" ".join(source_record.get("keywords", []))))
     source_tags = set(tokenize_text(" ".join(source_record.get("movielens_tags", []))))
@@ -109,6 +124,12 @@ def recommend_similar_movies(source_record, year_filter=None, limit=5):
         if candidate.get("imdb_id") == source_record.get("imdb_id"):
             continue
         if not _passes_year_filter(candidate, year_filter):
+            continue
+        if not _passes_genre_filters(
+            candidate,
+            include_genres=include_genres,
+            exclude_genres=exclude_genres,
+        ):
             continue
 
         candidate_genres = set(candidate.get("genres_ru", []))
@@ -134,6 +155,7 @@ def recommend_similar_movies(source_record, year_filter=None, limit=5):
 
         rating = float(candidate.get("rating", 0.0))
         community_rating = float(candidate.get("movielens_rating", 0.0))
+        include_bonus = 0.4 if include_genres else 0.0
         score = (
             genre_overlap * 2.7
             + keyword_overlap * 1.4
@@ -142,6 +164,7 @@ def recommend_similar_movies(source_record, year_filter=None, limit=5):
             + year_score * 1.6
             + rating / 6.0
             + community_rating / 10.0
+            + include_bonus
         )
         recommendations.append(
             {
@@ -158,7 +181,13 @@ def recommend_similar_movies(source_record, year_filter=None, limit=5):
     return recommendations[:limit]
 
 
-def search_movies_by_query(query_text, year_filter=None, limit=5):
+def search_movies_by_query(
+    query_text,
+    year_filter=None,
+    include_genres=None,
+    exclude_genres=None,
+    limit=5,
+):
     query_text = str(query_text or "").strip()
     if not query_text:
         return {"mode": "empty", "source": None, "matches": []}
@@ -170,7 +199,13 @@ def search_movies_by_query(query_text, year_filter=None, limit=5):
             "mode": "title_match",
             "source": source_record,
             "match_score": title_match["score"],
-            "matches": recommend_similar_movies(source_record, year_filter=year_filter, limit=limit),
+            "matches": recommend_similar_movies(
+                source_record,
+                year_filter=year_filter,
+                include_genres=include_genres,
+                exclude_genres=exclude_genres,
+                limit=limit,
+            ),
         }
 
     query_tokens = tokenize_text(query_text)
@@ -191,12 +226,20 @@ def search_movies_by_query(query_text, year_filter=None, limit=5):
             continue
         if not _passes_year_filter(record, year_filter):
             continue
+        if not _passes_genre_filters(
+            record,
+            include_genres=include_genres,
+            exclude_genres=exclude_genres,
+        ):
+            continue
 
         cosine_score = semantic_candidate["cosine_score"]
         semantic_overlap = semantic_candidate.get("matched_weight_ratio", semantic_candidate["matched_ratio"])
         term_coverage = semantic_candidate["matched_ratio"]
         fuzzy_score = _prefix_similarity(query_tokens, tokenize_text(record.get("title", "")))
-        keyword_tokens = set(tokenize_text(" ".join(record.get("keywords", []) + record.get("movielens_tags", []))))
+        keyword_tokens = set(
+            tokenize_text(" ".join(record.get("keywords", []) + record.get("movielens_tags", [])))
+        )
         keyword_overlap = len(query_token_set & keyword_tokens) / max(len(query_token_set), 1)
         genre_bonus = len(set(detected_genres) & set(record.get("genres_ru", []))) * 0.25
         semantic_unigrams = _semantic_unigram_tokens(record)
@@ -206,6 +249,8 @@ def search_movies_by_query(query_text, year_filter=None, limit=5):
             concept_bonus = 0.08 + min(concept_hits - 3, 2) * 0.02
         elif concept_hits == 2 and not title_like_query:
             concept_bonus = 0.03
+
+        include_bonus = 0.08 if include_genres else 0.0
         evidence_score = (
             cosine_score * 0.56
             + semantic_overlap * 0.24
@@ -214,6 +259,7 @@ def search_movies_by_query(query_text, year_filter=None, limit=5):
             + fuzzy_score * (0.08 if title_like_query else 0.015)
             + genre_bonus
             + concept_bonus
+            + include_bonus
         )
         if evidence_score < 0.1:
             continue

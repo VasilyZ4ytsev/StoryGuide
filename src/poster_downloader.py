@@ -7,10 +7,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-try:
-    from .dataset_loader import load_movie_metadata
-except ImportError:
-    from dataset_loader import load_movie_metadata
+from src.dataset_loader import load_movie_metadata
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent

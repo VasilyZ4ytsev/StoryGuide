@@ -3,10 +3,7 @@ import re
 from collections import Counter
 from functools import lru_cache
 
-try:
-    from .dataset_loader import REVIEWS_DATASET_PATH, dataset_file_exists
-except ImportError:
-    from dataset_loader import REVIEWS_DATASET_PATH, dataset_file_exists
+from src.dataset_loader import REVIEWS_DATASET_PATH, dataset_file_exists
 
 
 TOKEN_PATTERN = re.compile(r"[a-z']{3,}", re.IGNORECASE)

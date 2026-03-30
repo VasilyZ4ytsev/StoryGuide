@@ -1,1 +1,1 @@
-
+"""StoryGuide package."""

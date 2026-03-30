@@ -1,19 +1,20 @@
 import json
 import os
 import re
-from functools import lru_cache
 
-try:
-    from .movie_recommender import search_movies_by_query
-    from .nlp_processor import analyze_text
-except ImportError:
-    from movie_recommender import search_movies_by_query
-    from nlp_processor import analyze_text
+from src.movie_recommender import search_movies_by_query
+from src.nlp_processor import analyze_text
+from src.review_sentiment import build_review_sentiment_summary
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RULES_PATH = os.path.join(BASE_DIR, "data", "raw", "rules.json")
 YEAR_PATTERN = re.compile(r"\b(?:19|20)\d{2}\b")
+GREETING_ONLY_PATTERN = re.compile(
+    r"^(?:эй|ой|ну|привет|здравствуй|здравствуйте|салют|хай|добрый\s+день|добрый\s+вечер|доброе\s+утро|"
+    r"пожалуйста|а|ну-ка|\s|,|!|\?)+$",
+    flags=re.IGNORECASE,
+)
 
 
 def load_rules():
@@ -92,6 +93,20 @@ def _year_filter_text(year_filter):
     return ""
 
 
+def describe_active_filters(year_filter=None, include_genres=None, exclude_genres=None):
+    parts = []
+    year_text = _year_filter_text(year_filter or {})
+    if year_text:
+        parts.append(year_text.rstrip("."))
+    if include_genres:
+        parts.append(f"Жанровый фокус: {', '.join(include_genres)}")
+    if exclude_genres:
+        parts.append(f"Исключены жанры: {', '.join(exclude_genres)}")
+    if not parts:
+        return ""
+    return ". ".join(parts) + "."
+
+
 def _append_movie_description(lines, record):
     release_year = record.get("release_year")
     rating = _format_rating(record.get("rating"))
@@ -112,7 +127,7 @@ def _append_movie_description(lines, record):
         lines.append(f"Описание: {overview}")
 
 
-def _build_title_match_response(search_result, year_filter):
+def _build_title_match_response(search_result, year_filter, active_filters_text=""):
     source = search_result["source"]
     matches = search_result["matches"]
 
@@ -123,9 +138,12 @@ def _build_title_match_response(search_result, year_filter):
     if source_genres:
         lines.append(f"Жанры: {', '.join(source_genres)}.")
 
-    year_filter_info = _year_filter_text(year_filter)
-    if year_filter_info:
-        lines.append(year_filter_info)
+    if active_filters_text:
+        lines.append(active_filters_text)
+    else:
+        year_filter_info = _year_filter_text(year_filter)
+        if year_filter_info:
+            lines.append(year_filter_info)
 
     if not matches:
         lines.append("По текущим условиям похожие фильмы не нашлись.")
@@ -143,7 +161,7 @@ def _build_title_match_response(search_result, year_filter):
     return "\n".join(lines)
 
 
-def _build_hybrid_response(search_result, year_filter):
+def _build_hybrid_response(search_result, year_filter, active_filters_text=""):
     matches = search_result["matches"]
     detected_genres = search_result.get("detected_genres", [])
 
@@ -151,9 +169,12 @@ def _build_hybrid_response(search_result, year_filter):
     if detected_genres:
         lines.append(f"Под запрос хорошо подходят жанры: {', '.join(detected_genres)}.")
 
-    year_filter_info = _year_filter_text(year_filter)
-    if year_filter_info:
-        lines.append(year_filter_info)
+    if active_filters_text:
+        lines.append(active_filters_text)
+    else:
+        year_filter_info = _year_filter_text(year_filter)
+        if year_filter_info:
+            lines.append(year_filter_info)
 
     for index, item in enumerate(matches, start=1):
         record = item["record"]
@@ -166,51 +187,84 @@ def _build_hybrid_response(search_result, year_filter):
     return "\n".join(lines)
 
 
-def process_text_message(text, data_source=None):
+def extract_year_filter(text, nlp_analysis=None):
+    normalized_text = str(text or "").strip().lower()
+    if nlp_analysis is None:
+        nlp_analysis = analyze_text(text)
+    return _extract_year_filter(normalized_text, nlp_analysis)
+
+
+def analyze_query(text):
+    text = str(text or "")
+    normalized_text = text.strip().lower()
+    nlp_analysis = analyze_text(text)
+    return {
+        "text": text,
+        "normalized_text": normalized_text,
+        "nlp_analysis": nlp_analysis,
+        "nlp_warning": "",
+        "year_filter": extract_year_filter(text, nlp_analysis=nlp_analysis),
+        "sentiment_summary": build_review_sentiment_summary(text),
+    }
+
+
+def append_sentiment_summary(response, sentiment_summary="", text=""):
+    summary = sentiment_summary or build_review_sentiment_summary(text)
+    if not summary:
+        return response
+    return f"{summary}\n\n{response}"
+
+
+def build_recommendation_response(
+    text,
+    search_result,
+    year_filter=None,
+    sentiment_summary="",
+    active_filters_text="",
+):
     text = text if isinstance(text, str) else ""
     normalized_text = text.strip().lower()
 
     if not normalized_text:
         return "Напишите, какой фильм вам нравится, либо опишите желаемый сюжет."
 
-    try:
-        nlp_analysis = analyze_text(text)
-    except ModuleNotFoundError as error:
-        module_name = getattr(error, "name", "") or "unknown"
+    if GREETING_ONLY_PATTERN.fullmatch(normalized_text):
         return (
-            "Ошибка NLP-окружения: отсутствует модуль "
-            f"'{module_name}'. Установите зависимости командой "
-            "'pip install -r requirements.txt' и перезапустите приложение."
-        )
-    except (RuntimeError, AttributeError) as error:
-        return (
-            "Ошибка совместимости NLP-стека. "
-            f"Детали: {error}. Проверьте зависимости в venv и перезапустите приложение."
-        )
-
-    year_filter = _extract_year_filter(normalized_text, nlp_analysis)
-
-    if "привет" in normalized_text:
-        response = (
             "Привет! Я рекомендую фильмы по названию, жанрам и похожести запроса. "
             "Можно написать 'Мне нравится Toy Story', 'хочу триллер после 2010' "
             "или загрузить постер в чат."
         )
-        return response
 
-    search_result = search_movies_by_query(text, year_filter=year_filter, limit=5)
-    mode = search_result.get("mode")
-
+    mode = (search_result or {}).get("mode")
     if mode == "title_match":
-        response = _build_title_match_response(search_result, year_filter)
-        return response
+        response = _build_title_match_response(
+            search_result,
+            year_filter or {},
+            active_filters_text=active_filters_text,
+        )
+        return append_sentiment_summary(response, sentiment_summary=sentiment_summary, text=text)
 
-    if mode == "hybrid_query" and search_result.get("matches"):
-        response = _build_hybrid_response(search_result, year_filter)
-        return response
+    if mode == "hybrid_query" and (search_result or {}).get("matches"):
+        response = _build_hybrid_response(
+            search_result,
+            year_filter or {},
+            active_filters_text=active_filters_text,
+        )
+        return append_sentiment_summary(response, sentiment_summary=sentiment_summary, text=text)
 
     response = (
         "Не нашел подходящий фильм в текущем каталоге. "
         "Попробуйте точнее указать название, жанр или год."
     )
-    return response
+    return append_sentiment_summary(response, sentiment_summary=sentiment_summary, text=text)
+
+
+def process_text_message(text, data_source=None):
+    query_analysis = analyze_query(text)
+    search_result = search_movies_by_query(text, year_filter=query_analysis["year_filter"], limit=5)
+    return build_recommendation_response(
+        text,
+        search_result,
+        year_filter=query_analysis["year_filter"],
+        sentiment_summary=query_analysis["sentiment_summary"],
+    )

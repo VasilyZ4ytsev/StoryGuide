@@ -1,4 +1,3 @@
-import os
 import pickle
 from functools import lru_cache
 from pathlib import Path
@@ -6,34 +5,27 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-try:
-    from .dataset_loader import load_movie_metadata
-except ImportError:
-    from dataset_loader import load_movie_metadata
+from src.dataset_loader import load_movie_metadata
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FULL_POSTER_DIR = BASE_DIR / "data" / "raw" / "FullMoviePosters"
-SAMPLE_POSTER_DIR = BASE_DIR / "data" / "raw" / "SampleMoviePosters" / "SampleMoviePosters"
-ALT_SAMPLE_POSTER_DIR = BASE_DIR / "data" / "raw" / "SampleMoviePosters"
 POSTER_INDEX_PATH = BASE_DIR / "data" / "processed" / "poster_index.pkl"
 POSTER_INDEX_VERSION = 2
 
 
-def _poster_dir_candidates():
-    return (FULL_POSTER_DIR, SAMPLE_POSTER_DIR, ALT_SAMPLE_POSTER_DIR)
+def _require_poster_dir():
+    if not FULL_POSTER_DIR.is_dir():
+        raise FileNotFoundError(
+            f"Poster directory is missing: {FULL_POSTER_DIR.resolve()}"
+        )
 
-
-def _resolve_poster_dir():
-    for candidate in _poster_dir_candidates():
-        if candidate.is_dir():
-            return candidate
-    return Path()
-
-
-def poster_samples_available():
-    poster_dir = _resolve_poster_dir()
-    return bool(poster_dir) and any(poster_dir.glob("*.jpg"))
+    jpg_files = sorted(FULL_POSTER_DIR.glob("*.jpg"))
+    if not jpg_files:
+        raise FileNotFoundError(
+            f"Poster directory does not contain .jpg files: {FULL_POSTER_DIR.resolve()}"
+        )
+    return FULL_POSTER_DIR
 
 
 def _resize_for_matching(image_bgr, max_side=384):
@@ -152,8 +144,6 @@ def _movie_records_by_imdb_id():
 
 def _poster_file_signature(poster_dir):
     jpg_files = sorted(poster_dir.glob("*.jpg"))
-    if not jpg_files:
-        return {"dir": str(poster_dir), "count": 0, "latest_mtime": 0.0, "version": POSTER_INDEX_VERSION}
     latest_mtime = max(file_path.stat().st_mtime for file_path in jpg_files)
     return {
         "dir": str(poster_dir),
@@ -198,13 +188,14 @@ def _save_cached_index(signature, items):
 
 @lru_cache(maxsize=1)
 def load_poster_index():
-    poster_dir = _resolve_poster_dir()
-    if not poster_dir:
-        return []
-
+    poster_dir = _require_poster_dir()
     signature = _poster_file_signature(poster_dir)
     cached_items = _load_cached_index(signature)
     if cached_items is not None:
+        if not cached_items:
+            raise RuntimeError(
+                f"Poster index cache is empty for {poster_dir.resolve()}."
+            )
         return cached_items
 
     records_by_id = _movie_records_by_imdb_id()
@@ -235,6 +226,11 @@ def load_poster_index():
             }
         )
 
+    if not index:
+        raise RuntimeError(
+            f"Poster index could not be built from {poster_dir.resolve()}: no catalog-aligned posters were indexed."
+        )
+
     _save_cached_index(signature, index)
     return index
 
@@ -261,8 +257,6 @@ def _binary_descriptor_similarity(query_descriptors, candidate_descriptors):
 
 def match_movie_poster(image_bgr, top_k=3):
     poster_index = load_poster_index()
-    if not poster_index:
-        return None
 
     prepared_query = _resize_for_matching(image_bgr)
     center_query = _resize_for_matching(_center_crop(prepared_query))

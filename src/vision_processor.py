@@ -1,15 +1,12 @@
 import re
+import warnings
 from functools import lru_cache
 
 import cv2
 import numpy as np
 
-try:
-    from .dataset_loader import match_movie_title
-    from .poster_matcher import match_movie_poster, poster_index_stats, poster_samples_available
-except ImportError:
-    from dataset_loader import match_movie_title
-    from poster_matcher import match_movie_poster, poster_index_stats, poster_samples_available
+from src.dataset_loader import match_movie_title
+from src.poster_matcher import match_movie_poster, poster_index_stats
 
 
 TYPE_LABELS = {
@@ -40,9 +37,18 @@ MOVIE_HINTS = (
     "фильм",
 )
 WORD_PATTERN = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+")
+PIN_MEMORY_WARNING_PATTERN = re.escape(
+    "'pin_memory' argument is set as true but no accelerator is found, then device pinned memory won't be used."
+)
 
 
 def _require_easyocr():
+    warnings.filterwarnings(
+        "ignore",
+        message=PIN_MEMORY_WARNING_PATTERN,
+        category=UserWarning,
+        module=r"torch\.utils\.data\.dataloader",
+    )
     try:
         import easyocr
     except ModuleNotFoundError as error:
@@ -361,9 +367,10 @@ def _build_extracted_data(image_bgr, image_type, ocr_result, metrics):
     genres = _extract_genres(ocr_result["text"])
     title_match = match_movie_title(title_candidate or ocr_result["text"])
     poster_match = None
-    if image_type == "movie_poster" and poster_samples_available():
+    poster_stats = None
+    if image_type == "movie_poster":
         poster_match = match_movie_poster(image_bgr)
-    poster_stats = poster_index_stats() if poster_samples_available() else None
+        poster_stats = poster_index_stats()
 
     matched_record, match_source = _choose_movie_match(title_match, poster_match)
 

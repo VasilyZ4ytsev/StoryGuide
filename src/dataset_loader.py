@@ -6,14 +6,17 @@ import pickle
 import re
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
-from io import StringIO
 from functools import lru_cache
+from io import StringIO
+
+from src.nlp_processor import lemmatize_text
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 MERGED_METADATA_CACHE_PATH = os.path.join(PROCESSED_DIR, "merged_movie_metadata.pkl")
 MOVIE_LOCALIZATIONS_PATH = os.path.join(BASE_DIR, "data", "raw", "movie_localizations.json")
+DATASET_CACHE_VERSION = 3
 
 MOVIE_DATASET_PATH = os.path.join(BASE_DIR, "data", "raw", "MovieGenre.csv")
 REVIEWS_DATASET_PATH = os.path.join(BASE_DIR, "data", "raw", "IMDB Dataset.csv")
@@ -26,15 +29,35 @@ MOVIELENS_MOVIES_PATH = os.path.join(MOVIELENS_DIR, "movies.csv")
 MOVIELENS_RATINGS_PATH = os.path.join(MOVIELENS_DIR, "ratings.csv")
 MOVIELENS_TAGS_PATH = os.path.join(MOVIELENS_DIR, "tags.csv")
 MOVIELENS_LINKS_PATH = os.path.join(MOVIELENS_DIR, "links.csv")
+THE_MOVIES_REQUIRED_PATHS = [
+    THE_MOVIES_METADATA_PATH,
+    THE_MOVIES_CREDITS_PATH,
+    THE_MOVIES_KEYWORDS_PATH,
+]
+MOVIELENS_REQUIRED_PATHS = [
+    MOVIELENS_MOVIES_PATH,
+    MOVIELENS_RATINGS_PATH,
+    MOVIELENS_TAGS_PATH,
+    MOVIELENS_LINKS_PATH,
+]
+MOVIE_METADATA_REQUIRED_PATHS = [
+    MOVIE_DATASET_PATH,
+    MOVIE_LOCALIZATIONS_PATH,
+    *THE_MOVIES_REQUIRED_PATHS,
+    *MOVIELENS_REQUIRED_PATHS,
+]
 
 TITLE_YEAR_PATTERN = re.compile(r"\((\d{4})\)\s*$")
 NORMALIZE_PATTERN = re.compile(r"[^a-zа-яё0-9]+", re.IGNORECASE)
+CYRILLIC_PATTERN = re.compile(r"[а-яё]", re.IGNORECASE)
 
 GENRE_TRANSLATIONS = {
     "action": "боевик",
+    "adult": "для взрослых",
     "adventure": "приключения",
     "animation": "анимация",
     "biography": "биография",
+    "children": "семейный",
     "comedy": "комедия",
     "crime": "криминал",
     "documentary": "документальный",
@@ -42,25 +65,100 @@ GENRE_TRANSLATIONS = {
     "family": "семейный",
     "fantasy": "фэнтези",
     "film-noir": "нуар",
+    "foreign": "зарубежный",
+    "game-show": "игровое шоу",
     "history": "исторический",
     "horror": "ужасы",
+    "imax": "аймакс",
     "music": "музыка",
     "musical": "мюзикл",
     "mystery": "детектив",
+    "news": "новости",
+    "reality-tv": "реалити-шоу",
     "romance": "романтика",
     "sci-fi": "фантастика",
     "science fiction": "фантастика",
     "short": "короткометражный",
     "sport": "спорт",
+    "talk-show": "ток-шоу",
     "thriller": "триллер",
+    "tv movie": "телефильм",
     "war": "военный",
     "western": "вестерн",
 }
 
+TEXT_ARTIFACT_REPLACEMENTS = {
+    "\u00ed\u00a9": "é",
+    "\u00cc\u00a9": "é",
+    "\u00c3\u00a9": "é",
+    "\u00c2": "",
+    "\u00e2\u0080\u0099": "'",
+    "\u00e2\u0080\u009c": '"',
+    "\u00e2\u0080\u009d": '"',
+    "\u00e2\u0080\u0093": "-",
+    "\u00e2\u0080\u0094": "-",
+}
+
+MOJIBAKE_MARKERS = ("Ã", "Â", "Ð", "Ñ", "Ì", "\u00ed")
+
+
+def _mojibake_score(text):
+    value = str(text or "")
+    score = sum(value.count(marker) for marker in MOJIBAKE_MARKERS) * 4
+    score += value.count("\ufffd") * 8
+    score += sum(1 for char in value if 0x80 <= ord(char) <= 0x9F)
+    return score
+
+
+def _repair_text_artifacts(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    for source, target in TEXT_ARTIFACT_REPLACEMENTS.items():
+        text = text.replace(source, target)
+
+    best = text
+    best_score = _mojibake_score(text)
+    for source_encoding in ("latin-1", "cp1252"):
+        try:
+            candidate = text.encode(source_encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        candidate_score = _mojibake_score(candidate)
+        if candidate_score < best_score:
+            best = candidate
+            best_score = candidate_score
+
+    return best.strip()
+
+
+def _clean_text_list(values):
+    cleaned = []
+    for value in values or []:
+        normalized = _repair_text_artifacts(value)
+        if normalized:
+            cleaned.append(normalized)
+    return cleaned
+
 
 def _normalize_lookup_text(value):
-    lowered = str(value or "").strip().lower()
+    lowered = _repair_text_artifacts(value).lower()
     return NORMALIZE_PATTERN.sub(" ", lowered).strip()
+
+
+@lru_cache(maxsize=65536)
+def _normalize_lookup_lemma(value):
+    normalized = _normalize_lookup_text(value)
+    if not normalized or not CYRILLIC_PATTERN.search(normalized):
+        return normalized
+
+    lemmas = []
+    for token in lemmatize_text(normalized):
+        cleaned = NORMALIZE_PATTERN.sub(" ", str(token).lower()).strip()
+        if cleaned:
+            lemmas.extend(cleaned.split())
+    return " ".join(lemmas).strip() or normalized
 
 
 def _normalize_imdb_id(value):
@@ -117,7 +215,7 @@ def _safe_int(value, default=None):
 def _translated_genres(raw_genres):
     translated = []
     for genre in raw_genres:
-        key = genre.strip().lower()
+        key = _repair_text_artifacts(genre).strip().lower()
         translated.append(GENRE_TRANSLATIONS.get(key, key))
     return [genre for genre in translated if genre]
 
@@ -126,9 +224,18 @@ def dataset_file_exists(path):
     return os.path.exists(path)
 
 
+def _ensure_required_paths(paths, artifact_name):
+    missing_paths = [os.path.abspath(path) for path in paths if not dataset_file_exists(path)]
+    if missing_paths:
+        raise FileNotFoundError(
+            f"{artifact_name} requires missing files: {', '.join(missing_paths)}"
+        )
+
+
 def _open_dataset_csv(path):
     encodings = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
-    raw_bytes = open(path, "rb").read()
+    with open(path, "rb") as source_file:
+        raw_bytes = source_file.read()
     last_error = None
 
     for encoding in encodings:
@@ -160,7 +267,7 @@ def _extract_names(raw_value, limit=None):
     for item in _parse_jsonish_list(raw_value):
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name", "")).strip()
+        name = _repair_text_artifacts(item.get("name", ""))
         if name:
             names.append(name)
         if limit is not None and len(names) >= limit:
@@ -173,12 +280,16 @@ def _extract_director(raw_value):
         if not isinstance(item, dict):
             continue
         if str(item.get("job", "")).strip().lower() == "director":
-            return str(item.get("name", "")).strip()
+            return _repair_text_artifacts(item.get("name", ""))
     return ""
 
 
 def _translate_movielens_genres(raw_value):
-    items = [item for item in str(raw_value or "").split("|") if item and item != "(no genres listed)"]
+    items = [
+        _repair_text_artifacts(item)
+        for item in str(raw_value or "").split("|")
+        if item and item != "(no genres listed)"
+    ]
     return items, _translated_genres(items)
 
 
@@ -201,9 +312,12 @@ def _normalize_localization_entry(raw_entry):
 
     normalized_entry = {}
     for key in ("title_ru", "overview_ru", "tagline_ru"):
-        value = str(raw_entry.get(key, "")).strip()
+        value = _repair_text_artifacts(raw_entry.get(key, ""))
         if value:
             normalized_entry[key] = value
+    aliases_ru = _clean_text_list(raw_entry.get("aliases_ru", []))
+    if aliases_ru:
+        normalized_entry["aliases_ru"] = aliases_ru
     return normalized_entry
 
 
@@ -213,8 +327,7 @@ def _load_movie_localizations():
     by_tmdb = {}
     by_title_year = {}
 
-    if not dataset_file_exists(MOVIE_LOCALIZATIONS_PATH):
-        return {"by_imdb": by_imdb, "by_tmdb": by_tmdb, "by_title_year": by_title_year}
+    _ensure_required_paths([MOVIE_LOCALIZATIONS_PATH], "Movie localizations")
 
     with open(MOVIE_LOCALIZATIONS_PATH, "r", encoding="utf-8") as file:
         payload = json.load(file)
@@ -255,7 +368,7 @@ def _pick_localization(base_record, themovies, movielens):
 
 
 def _source_signature(paths):
-    signature = []
+    signature = [("cache_version", DATASET_CACHE_VERSION)]
     for path in paths:
         if os.path.exists(path):
             stat = os.stat(path)
@@ -288,13 +401,7 @@ def _save_cache(path, signature, data):
 
 @lru_cache(maxsize=1)
 def _load_themovies_enrichment():
-    required_paths = [
-        THE_MOVIES_METADATA_PATH,
-        THE_MOVIES_CREDITS_PATH,
-        THE_MOVIES_KEYWORDS_PATH,
-    ]
-    if not all(dataset_file_exists(path) for path in required_paths):
-        return {"by_imdb": {}, "by_tmdb": {}, "by_title_year": {}}
+    _ensure_required_paths(THE_MOVIES_REQUIRED_PATHS, "The Movies enrichment")
 
     keywords_by_tmdb = {}
     with _open_dataset_csv(THE_MOVIES_KEYWORDS_PATH) as file:
@@ -325,7 +432,7 @@ def _load_themovies_enrichment():
         for row in reader:
             tmdb_id = _normalize_tmdb_id(row.get("id"))
             imdb_id = _normalize_imdb_id(row.get("imdb_id"))
-            title = str(row.get("title") or row.get("original_title") or "").strip()
+            title = _repair_text_artifacts(row.get("title") or row.get("original_title") or "")
             normalized_title = _normalize_lookup_text(title)
             release_year = _parse_release_year_from_date(row.get("release_date"))
 
@@ -335,15 +442,15 @@ def _load_themovies_enrichment():
                 "imdb_id": imdb_id,
                 "metadata_title": title,
                 "normalized_metadata_title": normalized_title,
-                "original_title": str(row.get("original_title", "")).strip(),
-                "overview": str(row.get("overview", "")).strip(),
-                "tagline": str(row.get("tagline", "")).strip(),
+                "original_title": _repair_text_artifacts(row.get("original_title", "")),
+                "overview": _repair_text_artifacts(row.get("overview", "")),
+                "tagline": _repair_text_artifacts(row.get("tagline", "")),
                 "metadata_release_year": release_year,
                 "metadata_genres_en": genres_en,
                 "metadata_genres_ru": _translated_genres(genres_en),
-                "keywords": keywords_by_tmdb.get(tmdb_id, []),
-                "cast": credits_by_tmdb.get(tmdb_id, {}).get("cast", []),
-                "director": credits_by_tmdb.get(tmdb_id, {}).get("director", ""),
+                "keywords": _clean_text_list(keywords_by_tmdb.get(tmdb_id, [])),
+                "cast": _clean_text_list(credits_by_tmdb.get(tmdb_id, {}).get("cast", [])),
+                "director": _repair_text_artifacts(credits_by_tmdb.get(tmdb_id, {}).get("director", "")),
                 "tmdb_popularity": _safe_float(row.get("popularity"), 0.0),
             }
 
@@ -359,14 +466,7 @@ def _load_themovies_enrichment():
 
 @lru_cache(maxsize=1)
 def _load_movielens_enrichment():
-    required_paths = [
-        MOVIELENS_MOVIES_PATH,
-        MOVIELENS_RATINGS_PATH,
-        MOVIELENS_TAGS_PATH,
-        MOVIELENS_LINKS_PATH,
-    ]
-    if not all(dataset_file_exists(path) for path in required_paths):
-        return {"by_imdb": {}, "by_tmdb": {}}
+    _ensure_required_paths(MOVIELENS_REQUIRED_PATHS, "MovieLens enrichment")
 
     links_by_movie_id = {}
     with _open_dataset_csv(MOVIELENS_LINKS_PATH) as file:
@@ -389,7 +489,7 @@ def _load_movielens_enrichment():
                 continue
             genres_en, genres_ru = _translate_movielens_genres(row.get("genres"))
             movie_info_by_id[movie_id] = {
-                "movielens_title": str(row.get("title", "")).strip(),
+                "movielens_title": _repair_text_artifacts(row.get("title", "")),
                 "movielens_genres_en": genres_en,
                 "movielens_genres_ru": genres_ru,
             }
@@ -413,7 +513,7 @@ def _load_movielens_enrichment():
             movie_id = _safe_int(row.get("movieId"))
             if movie_id is None:
                 continue
-            tag = str(row.get("tag", "")).strip().lower()
+            tag = _repair_text_artifacts(row.get("tag", "")).lower()
             if len(tag) < 2:
                 continue
             tag_counters[movie_id][tag] += 1
@@ -450,22 +550,30 @@ def _merge_record(base_record, themovies, movielens):
     movielens = movielens or {}
     localization = _pick_localization(base_record, themovies, movielens)
     tmdb_id = themovies.get("tmdb_id") or movielens.get("tmdb_id") or ""
-    original_title = themovies.get("original_title", "")
+    original_title = _repair_text_artifacts(themovies.get("original_title", ""))
 
     metadata_genres_ru = themovies.get("metadata_genres_ru", [])
     metadata_genres_en = themovies.get("metadata_genres_en", [])
     movielens_genres_ru = movielens.get("movielens_genres_ru", [])
     movielens_genres_en = movielens.get("movielens_genres_en", [])
 
-    genres_ru = list(dict.fromkeys(base_record.get("genres_ru", []) + metadata_genres_ru + movielens_genres_ru))
-    genres_en = list(dict.fromkeys(base_record.get("genres_en", []) + metadata_genres_en + movielens_genres_en))
+    genres_ru = list(
+        dict.fromkeys(
+            _clean_text_list(base_record.get("genres_ru", []) + metadata_genres_ru + movielens_genres_ru)
+        )
+    )
+    genres_en = list(
+        dict.fromkeys(
+            _clean_text_list(base_record.get("genres_en", []) + metadata_genres_en + movielens_genres_en)
+        )
+    )
 
-    overview = themovies.get("overview", "")
-    tagline = themovies.get("tagline", "")
-    keywords = themovies.get("keywords", [])
-    cast = themovies.get("cast", [])
-    director = themovies.get("director", "")
-    movielens_tags = movielens.get("movielens_tags", [])
+    overview = _repair_text_artifacts(themovies.get("overview", ""))
+    tagline = _repair_text_artifacts(themovies.get("tagline", ""))
+    keywords = _clean_text_list(themovies.get("keywords", []))
+    cast = _clean_text_list(themovies.get("cast", []))
+    director = _repair_text_artifacts(themovies.get("director", ""))
+    movielens_tags = _clean_text_list(movielens.get("movielens_tags", []))
 
     if not merged.get("release_year"):
         merged["release_year"] = themovies.get("metadata_release_year")
@@ -479,13 +587,14 @@ def _merge_record(base_record, themovies, movielens):
     else:
         merged["rating"] = imdb_rating
 
-    title_ru = str(localization.get("title_ru", "")).strip()
+    title_ru = _repair_text_artifacts(localization.get("title_ru", ""))
     if not title_ru and _has_cyrillic(base_record.get("title", "")):
-        title_ru = str(base_record.get("title", "")).strip()
+        title_ru = _repair_text_artifacts(base_record.get("title", ""))
+    aliases_ru = _clean_text_list(localization.get("aliases_ru", []))
 
-    overview_ru = str(localization.get("overview_ru", "")).strip()
-    tagline_ru = str(localization.get("tagline_ru", "")).strip()
-    display_title = title_ru or base_record.get("title", "")
+    overview_ru = _repair_text_artifacts(localization.get("overview_ru", ""))
+    tagline_ru = _repair_text_artifacts(localization.get("tagline_ru", ""))
+    display_title = title_ru or _repair_text_artifacts(base_record.get("title", ""))
     display_full_title = _build_display_full_title(display_title, merged.get("release_year"))
 
     merged.update(
@@ -495,6 +604,10 @@ def _merge_record(base_record, themovies, movielens):
             "normalized_original_title": _normalize_lookup_text(original_title),
             "title_ru": title_ru,
             "normalized_title_ru": _normalize_lookup_text(title_ru),
+            "normalized_title_ru_lemma": _normalize_lookup_lemma(title_ru),
+            "title_aliases_ru": aliases_ru,
+            "normalized_title_aliases_ru": [_normalize_lookup_text(alias) for alias in aliases_ru],
+            "normalized_title_aliases_ru_lemma": [_normalize_lookup_lemma(alias) for alias in aliases_ru],
             "display_title": display_title,
             "display_full_title": display_full_title,
             "overview": overview,
@@ -512,7 +625,7 @@ def _merge_record(base_record, themovies, movielens):
             "movielens_tags": movielens_tags,
             "genres_ru": genres_ru,
             "genres_en": genres_en,
-            "semantic_terms": list(dict.fromkeys(keywords + cast + movielens_tags)),
+            "semantic_terms": list(dict.fromkeys(_clean_text_list(keywords + cast + movielens_tags))),
         }
     )
     return merged
@@ -528,13 +641,17 @@ def _base_movie_records():
     with _open_dataset_csv(MOVIE_DATASET_PATH) as file:
         reader = csv.DictReader(file)
         for row in reader:
-            full_title = str(row.get("Title", "")).strip()
+            full_title = _repair_text_artifacts(row.get("Title", ""))
             if not full_title:
                 continue
 
             clean_title = _clean_title(full_title)
             imdb_score = _safe_float(row.get("IMDB Score"), 0.0)
-            genres_en = [item.strip() for item in str(row.get("Genre", "")).split("|") if item.strip()]
+            genres_en = [
+                _repair_text_artifacts(item)
+                for item in str(row.get("Genre", "")).split("|")
+                if _repair_text_artifacts(item)
+            ]
             genres_ru = _translated_genres(genres_en)
             imdb_id = _normalize_imdb_id(row.get("imdbId"))
 
@@ -554,8 +671,8 @@ def _base_movie_records():
                     "genres_en": genres_en,
                     "genres_ru": genres_ru,
                     "release_year": _parse_release_year(full_title),
-                    "poster_url": str(row.get("Poster", "")).strip(),
-                    "imdb_link": str(row.get("Imdb Link", "")).strip(),
+                    "poster_url": _repair_text_artifacts(row.get("Poster", "")),
+                    "imdb_link": _repair_text_artifacts(row.get("Imdb Link", "")),
                 }
             )
 
@@ -564,18 +681,8 @@ def _base_movie_records():
 
 @lru_cache(maxsize=1)
 def load_movie_metadata():
-    required_paths = [
-        MOVIE_DATASET_PATH,
-        MOVIE_LOCALIZATIONS_PATH,
-        THE_MOVIES_METADATA_PATH,
-        THE_MOVIES_CREDITS_PATH,
-        THE_MOVIES_KEYWORDS_PATH,
-        MOVIELENS_MOVIES_PATH,
-        MOVIELENS_RATINGS_PATH,
-        MOVIELENS_TAGS_PATH,
-        MOVIELENS_LINKS_PATH,
-    ]
-    signature = _source_signature(required_paths)
+    _ensure_required_paths(MOVIE_METADATA_REQUIRED_PATHS, "Merged movie metadata")
+    signature = _source_signature(MOVIE_METADATA_REQUIRED_PATHS)
     cached = _load_cache(MERGED_METADATA_CACHE_PATH, signature)
     if cached is not None:
         return cached
@@ -607,23 +714,33 @@ def _title_match_score(candidate, record):
     normalized_candidate = _normalize_lookup_text(candidate)
     if not normalized_candidate:
         return 0.0
+    normalized_candidate_lemma = _normalize_lookup_lemma(candidate)
 
     exact_targets = {
         record["normalized_title"],
         record["normalized_full_title"],
         record.get("normalized_original_title", ""),
         record.get("normalized_title_ru", ""),
+        record.get("normalized_title_ru_lemma", ""),
     }
+    exact_targets.update(record.get("normalized_title_aliases_ru", []))
+    exact_targets.update(record.get("normalized_title_aliases_ru_lemma", []))
     if normalized_candidate in exact_targets:
+        return 1.0
+    if normalized_candidate_lemma and normalized_candidate_lemma in exact_targets:
         return 1.0
 
     candidate_tokens = set(normalized_candidate.split())
+    candidate_lemma_tokens = set(normalized_candidate_lemma.split()) if normalized_candidate_lemma else set()
     title_candidates = [
         record["normalized_title"],
         record["normalized_full_title"],
         record.get("normalized_original_title", ""),
         record.get("normalized_title_ru", ""),
+        record.get("normalized_title_ru_lemma", ""),
     ]
+    title_candidates.extend(record.get("normalized_title_aliases_ru", []))
+    title_candidates.extend(record.get("normalized_title_aliases_ru_lemma", []))
 
     best_score = 0.0
     for target in title_candidates:
@@ -631,24 +748,45 @@ def _title_match_score(candidate, record):
             continue
         record_tokens = set(target.split())
         token_overlap = len(candidate_tokens & record_tokens) / max(len(candidate_tokens), 1)
+        lemma_overlap = (
+            len(candidate_lemma_tokens & record_tokens) / max(len(candidate_lemma_tokens), 1)
+            if candidate_lemma_tokens
+            else 0.0
+        )
         sequence_score = SequenceMatcher(None, normalized_candidate, target).ratio()
+        lemma_sequence_score = (
+            SequenceMatcher(None, normalized_candidate_lemma, target).ratio()
+            if normalized_candidate_lemma
+            else 0.0
+        )
         if normalized_candidate in target or target in normalized_candidate:
             sequence_score += 0.15
-        best_score = max(best_score, token_overlap, sequence_score)
+        if normalized_candidate_lemma and (
+            normalized_candidate_lemma in target or target in normalized_candidate_lemma
+        ):
+            lemma_sequence_score += 0.15
+        best_score = max(best_score, token_overlap, lemma_overlap, sequence_score, lemma_sequence_score)
 
     return min(1.0, best_score)
 
 
 def _is_plausible_title_match(normalized_candidate, record, score):
     candidate_tokens = normalized_candidate.split()
+    candidate_lemma = _normalize_lookup_lemma(normalized_candidate)
+    candidate_lemma_tokens = candidate_lemma.split() if candidate_lemma else []
     title_targets = [
         record["normalized_title"],
         record["normalized_full_title"],
         record.get("normalized_original_title", ""),
         record.get("normalized_title_ru", ""),
+        record.get("normalized_title_ru_lemma", ""),
     ]
+    title_targets.extend(record.get("normalized_title_aliases_ru", []))
+    title_targets.extend(record.get("normalized_title_aliases_ru_lemma", []))
 
     if normalized_candidate in title_targets:
+        return True
+    if candidate_lemma and candidate_lemma in title_targets:
         return True
 
     best_sequence = 0.0
@@ -658,7 +796,11 @@ def _is_plausible_title_match(normalized_candidate, record, score):
             continue
         target_tokens = set(target.split())
         best_overlap = max(best_overlap, len(set(candidate_tokens) & target_tokens))
+        if candidate_lemma_tokens:
+            best_overlap = max(best_overlap, len(set(candidate_lemma_tokens) & target_tokens))
         best_sequence = max(best_sequence, SequenceMatcher(None, normalized_candidate, target).ratio())
+        if candidate_lemma:
+            best_sequence = max(best_sequence, SequenceMatcher(None, candidate_lemma, target).ratio())
 
     if best_overlap > 0 and score >= 0.62:
         return True

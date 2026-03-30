@@ -1,23 +1,51 @@
-import inspect
-from collections import namedtuple
+import warnings
 from functools import lru_cache
+from importlib.metadata import entry_points
+
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+)
 
 
-def _ensure_inspect_compatibility():
-    # pymorphy2 expects inspect.getargspec, removed in Python 3.11+.
-    if hasattr(inspect, "getargspec"):
+def _patch_pymorphy2_entry_points():
+    try:
+        import pkg_resources  # type: ignore
+    except ModuleNotFoundError:
+        pkg_resources = None
+
+    if pkg_resources is not None:
         return
 
-    arg_spec = namedtuple("ArgSpec", ["args", "varargs", "keywords", "defaults"])
+    import pymorphy2.analyzer as pymorphy2_analyzer
 
-    def _getargspec(func):
-        full = inspect.getfullargspec(func)
-        return arg_spec(full.args, full.varargs, full.varkw, full.defaults)
+    def _iter_entry_points(*args, **kwargs):
+        group = kwargs.get("group")
+        name = kwargs.get("name")
+        if args:
+            group = args[0]
+        if len(args) > 1:
+            name = args[1]
 
-    inspect.getargspec = _getargspec
+        discovered = entry_points()
+        if hasattr(discovered, "select"):
+            filters = {}
+            if group is not None:
+                filters["group"] = group
+            if name is not None:
+                filters["name"] = name
+            return tuple(discovered.select(**filters))
+
+        candidates = tuple(discovered.get(group, ())) if group is not None else tuple(discovered)
+        if name is not None:
+            candidates = tuple(item for item in candidates if item.name == name)
+        return candidates
+
+    pymorphy2_analyzer._iter_entry_points = _iter_entry_points
 
 
-_ensure_inspect_compatibility()
+_patch_pymorphy2_entry_points()
 
 from natasha import (
     DatesExtractor,
@@ -44,6 +72,32 @@ def _unique(values):
         seen.add(key)
         result.append(normalized)
     return result
+
+
+class TextLemmatizer:
+    def __init__(self):
+        embedding = NewsEmbedding()
+        self._doc_type = Doc
+        self._segmenter = Segmenter()
+        self._morph_tagger = NewsMorphTagger(embedding)
+        self._morph_vocab = MorphVocab()
+
+    def lemmatize(self, text):
+        text = text if isinstance(text, str) else ""
+        if not text.strip():
+            return []
+
+        doc = self._doc_type(text)
+        doc.segment(self._segmenter)
+        doc.tag_morph(self._morph_tagger)
+
+        lemmas = []
+        for token in doc.tokens:
+            token.lemmatize(self._morph_vocab)
+            lemma = (token.lemma or token.text).strip().lower()
+            if lemma:
+                lemmas.append(lemma)
+        return lemmas
 
 
 class NLPProcessor:
@@ -104,6 +158,16 @@ class NLPProcessor:
             "organizations": _unique(organizations),
             "lemmas": _unique(lemmas),
         }
+
+
+@lru_cache(maxsize=1)
+def get_text_lemmatizer():
+    return TextLemmatizer()
+
+
+@lru_cache(maxsize=65536)
+def lemmatize_text(text):
+    return tuple(get_text_lemmatizer().lemmatize(text))
 
 
 @lru_cache(maxsize=1)

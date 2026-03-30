@@ -5,10 +5,7 @@ import re
 from collections import Counter, defaultdict
 from functools import lru_cache
 
-try:
-    from .dataset_loader import MERGED_METADATA_CACHE_PATH, load_movie_metadata
-except ImportError:
-    from dataset_loader import MERGED_METADATA_CACHE_PATH, load_movie_metadata
+from src.dataset_loader import MERGED_METADATA_CACHE_PATH, load_movie_metadata
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -150,6 +147,8 @@ def load_text_search_index():
         return cached
 
     records = load_movie_metadata()
+    if not records:
+        raise RuntimeError("Movie metadata is empty; cannot build text search index.")
     document_tokens = []
     document_frequency = Counter()
 
